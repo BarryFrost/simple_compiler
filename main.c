@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <assert.h>
 
 char* token_type[4] = {
   "punctuator",
@@ -11,6 +12,10 @@ char* token_type[4] = {
   "EOF",
   ""
 };
+
+/**
+ * Tokenizer
+ */
 
 typedef enum {
   TK_PUNCT,
@@ -113,8 +118,8 @@ static Token *tokenize(void) {
       continue;
     }
 
-    // Punctuator
-    if (*p == '+' || *p == '-') {
+    // Punctuators
+    if (ispunct(*p)) {
       cur = cur->next = new_token(TK_PUNCT, p, p + 1);
       p++;
       continue;
@@ -127,38 +132,173 @@ static Token *tokenize(void) {
   return head.next;
 }
 
-int main(int argc, char **argv){
+/**
+ * Parser
+ */
+  
+typedef enum {
+  ND_ADD, // +
+  ND_SUB, // -
+  ND_MUL, // *
+  ND_DIV, // /
+  ND_NUM, // Integer
+} NodeKind;
+
+// AST node type
+typedef struct Node Node;
+struct Node {
+  NodeKind kind; // Node kind
+  Node* lhs;     // left-hand side
+  Node* rhs;     // right-hand side
+  int val;       // Used if kind == ND_NUM
+};
+
+static Node *new_node(NodeKind kind) {
+  Node *node = calloc(1, sizeof(Node));
+  node->kind = kind;
+  return node;
+}
+
+static Node *new_binary(NodeKind kind, Node *lhs, Node* rhs) {
+  Node *node = new_node(kind);
+  node->lhs = lhs;
+  node->rhs = rhs;
+  return node;
+}
+
+static Node *new_num(int val) {
+  Node *node = new_node(ND_NUM);
+  node->val = val;
+  return node;
+}
+  
+static Node *expr(Token **rest, Token *tok);
+static Node *mul(Token **rest, Token *tok);
+static Node *primary(Token **rest, Token *tok);
+
+// expr = mul ("+" mul | "-" mul)* 
+static Node *expr(Token **rest, Token *tok) {
+  Node *node = mul(&tok, tok);
+
+  for(;;) {
+    if(equal(tok, "+")) {
+      node = new_binary(ND_ADD, node, mul(&tok, tok->next));
+      continue;
+    }
+
+    if(equal(tok, "-")) {
+      node = new_binary(ND_SUB, node, mul(&tok, tok->next));
+      continue;
+    }
+
+    *rest = tok;
+    return node;
+  }
+} 
+    
+// mul = primary ("*" primary | "/" primary)*
+static Node *mul(Token **rest, Token *tok) {
+  Node * node = primary(&tok, tok);
+
+  for(;;) {
+    if(equal(tok, "*")) {
+      node = new_binary(ND_MUL, node, primary(&tok, tok->next));
+      continue;
+    }
+
+    if(equal(tok, "/")) {
+      node = new_binary(ND_DIV, node, primary(&tok, tok->next));
+      continue;
+    }
+
+    *rest = tok;
+    return node;
+  }
+}
+
+// primary = "(" expr ")" | num
+static Node *primary(Token **rest, Token *tok) {
+  if(equal(tok, "(")) {
+    Node *node = expr(&tok, tok->next);
+    *rest = skip(tok, ")");
+    return node;
+  }
+
+  if(tok->kind == TK_NUM) {
+    Node *node = new_num(tok->val);
+    *rest = tok->next;
+    return node;
+  }
+
+  error_tok(tok, "expected an expression");
+}
+
+/**
+ *  Code generator
+ */
+
+static int depth;
+
+static void push(void) {
+  printf("  push %%eax\n");
+  depth++;
+}
+
+static void pop(char *arg) {
+  printf("  pop %s\n", arg);
+  depth--;
+}
+
+static void gen_expr(Node *node) {
+  if(node->kind == ND_NUM) {
+    printf("  mov $%d, %%eax\n", node->val);
+    return;
+  }
+
+  gen_expr(node->rhs);
+  push();
+  gen_expr(node->lhs);
+  pop("%edi");
+
+  switch (node->kind)
+  {
+  case ND_ADD:
+    printf("  add %%edi, %%eax\n");
+    return;
+  case ND_SUB:
+    printf("  sub %%edi, %%eax\n");
+    return;
+  case ND_MUL:
+    printf("  imul %%edi, %%eax\n");
+    return;
+  case ND_DIV:
+    printf("  cdq\n");    // cqo in 32-bit mode, cqo is for 64-bit mode, extend the signed field from eax to edx register, commonly used in division.
+    printf("  idiv %%edi\n");
+    return ;
+  }
+
+  error("invalid expression");
+}
+
+int main(int argc, char **argv) {
   if(argc != 2)
     error("%s: invalid number of arguments", argv[0]);
   
+  // Tokenize and parse
   current_input = argv[1];
   Token *tok = tokenize();
+  Node *node = expr(&tok, tok);
 
-  printf("  .global main\n");
-  printf("main:\n");
+  if(tok->kind != TK_EOF)
+    error_tok(tok, "extra token");
   
-  // The first token must be a number
-  printf("/* token type: %s, value: %d, loc: %s, len: %d */\n",
-    token_type[tok->kind], tok->val, tok->loc, tok->len);
-  printf("  mov $%d, %%eax\n", get_number(tok));
-  tok = tok->next;
+  printf("  .globl main\n");
+  printf("main:\n");
 
-  // ... followed by either `+ <number>` or `- <number>`.
-  while (tok->kind != TK_EOF) {
-    printf("/* token type: %s, value: %d, loc: %s, len: %d */\n",
-    token_type[tok->kind], tok->val, tok->loc, tok->len);
-    
-    if (equal(tok, "+")) {
-      printf("  add $%d, %%eax\n", get_number(tok->next));
-      tok = tok->next->next;
-      continue;
-    }
-    
-    tok = skip(tok, "-"); 
-    printf("  sub $%d, %%eax\n", get_number(tok));
-    tok = tok->next;
-  }
-
+  // Traverse the AST to emit assembly
+  gen_expr(node);
   printf("  ret\n");
+
+  assert(depth == 0);
   return 0;
 }
