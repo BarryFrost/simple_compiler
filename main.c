@@ -294,6 +294,7 @@ int main(int argc, char **argv) {
   
   printf("  .globl main\n");
   printf("main:\n");
+  printf(".code32\n"); // inform the 64-bit machine to execute in 32 bit mode
 
   // Traverse the AST to emit assembly
   gen_expr(node);
