@@ -16,4 +16,4 @@ jobs:
     - name: build
       run: make
     - name: test
-      run: ./test.sh
+      run: make test
